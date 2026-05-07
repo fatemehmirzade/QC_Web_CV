@@ -810,29 +810,18 @@ def build_system_prompt(candidate_display_terms, total_count, active_count):
 
 # LLM call
 
-def call_gpt(messages, api_key, reasoning_effort):
+def call_gpt(messages, api_key):
     client = OpenAI(api_key=api_key, timeout=API_TIMEOUT)
-    kwargs = dict(model="gpt-5.2", messages=messages, max_completion_tokens=16000)
-
-    response = None
-    if reasoning_effort in ("low", "medium", "high"):
-        try:
-            response = client.chat.completions.create(
-                **kwargs, reasoning_effort=reasoning_effort
-            )
-        except (TypeError, BadRequestError) as e:
-            logger.info(
-                "reasoning_effort not supported, retrying without: %s", e
-            )
-            response = None
-
-    if response is None:
-        try:
-            response = client.chat.completions.create(**kwargs)
-        except APITimeoutError:
-            return None, "The API request timed out. Please try again."
-        except APIError as e:
-            return None, f"OpenAI API error: {e}"
+    try:
+        response = client.chat.completions.create(
+            model="gpt-5.4-mini",
+            messages=messages,
+            max_completion_tokens=16000,
+        )
+    except APITimeoutError:
+        return None, "The API request timed out. Please try again."
+    except APIError as e:
+        return None, f"OpenAI API error: {e}"
 
     raw = response.choices[0].message.content.strip()
     return _parse_json_response(raw)
@@ -890,21 +879,11 @@ def render_sidebar(display_terms, active_count, api_key):
             "No API key found. Set OPENAI_API_KEY env var or .streamlit/secrets.toml."
         )
 
-    reasoning_effort = st.sidebar.radio(
-        "Reasoning Effort",
-        options=["low", "medium", "high"],
-        index=1,
-        help="low = faster | medium = balanced | high = slowest, most accurate.",
-    )
-
     st.sidebar.markdown("---")
     st.sidebar.write("Source: qc_metrics_specific.obo")
     st.sidebar.write(f"Number of Terms: {len(display_terms)} ")
     st.sidebar.write("Classification: 7 dimensions")
-    st.sidebar.write("Model: GPT-5.2")
-    st.sidebar.write(f"Reasoning: {reasoning_effort}")
-
-    return reasoning_effort
+    st.sidebar.write("Model: GPT-5.4 Mini")
 
 
 def render_accepted_sidebar():
@@ -1074,7 +1053,7 @@ def _render_overlap_table(result, is_new_metric):
         )
 
 
-def render_clarification_ui(result, api_key, reasoning_effort):
+def render_clarification_ui(result, api_key):
     if not (result.get("needs_more_detail") and result.get("clarification_question")):
         return False
 
@@ -1095,8 +1074,8 @@ def render_clarification_ui(result, api_key, reasoning_effort):
                 "Please re-evaluate the proposed metric."
             ),
         })
-        with st.spinner(f"Re-analyzing with GPT-5.2 (reasoning: {reasoning_effort}) ..."):
-            result2, error2 = call_gpt(st.session_state.messages, api_key, reasoning_effort)
+        with st.spinner("Re-analyzing with GPT-5.4 Mini ..."):
+            result2, error2 = call_gpt(st.session_state.messages, api_key)
             if error2:
                 st.error(error2)
                 return False
@@ -1158,11 +1137,10 @@ def main():
         f"Validates new metric proposals against "
         f"**{len(display_terms)}** existing QC terms "
         f"({active_count} active, {len(display_terms) - active_count} obsolete) "
-        f"parsed from the official OBO ontology using **GPT-5.2** with "
-        f"configurable reasoning."
+        f"parsed from the official OBO ontology using **GPT-5.4 Mini**."
     )
 
-    reasoning_effort = render_sidebar(display_terms, active_count, api_key)
+    render_sidebar(display_terms, active_count, api_key)
     render_accepted_sidebar()
 
     for key, default in [
@@ -1232,12 +1210,8 @@ def main():
             },
         ]
 
-        with st.spinner(
-            f"Analyzing with GPT-5.2 (reasoning: {reasoning_effort}) ..."
-        ):
-            result, error = call_gpt(
-                st.session_state.messages, api_key, reasoning_effort
-            )
+        with st.spinner("Analyzing with GPT-5.4 Mini ..."):
+            result, error = call_gpt(st.session_state.messages, api_key)
             if error:
                 st.error(error)
                 return
@@ -1253,7 +1227,7 @@ def main():
         return
 
     render_results(result, raw_terms)
-    render_clarification_ui(result, api_key, reasoning_effort)
+    render_clarification_ui(result, api_key)
 
 
 if __name__ == "__main__":
