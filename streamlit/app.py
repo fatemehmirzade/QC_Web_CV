@@ -4,6 +4,7 @@ import re
 import datetime
 import hashlib
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,7 @@ TOP_K_EMBED = 25
 GRAPH_HOP_LIMIT = 2
 MAX_CANDIDATES = 40
 API_TIMEOUT = 120
+MAX_REQUESTS_PER_DAY = 20
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +257,16 @@ UNIT_NAME_TO_ID = {
     "counts": "UO:0000189",
     "count": "UO:0000189",
 }
+
+
+def check_rate_limit():
+    if "request_count" not in st.session_state:
+        st.session_state.request_count = 0
+        st.session_state.first_request_time = time.time()
+    if time.time() - st.session_state.first_request_time > 86400:
+        st.session_state.request_count = 0
+        st.session_state.first_request_time = time.time()
+    return st.session_state.request_count < MAX_REQUESTS_PER_DAY
 
 
 def _resolve_unit(unit_name):
@@ -1754,6 +1766,14 @@ def main():
         )
 
     if analyze_clicked:
+        if not check_rate_limit():
+            st.error(
+                f"Daily limit reached ({MAX_REQUESTS_PER_DAY} analyses per day). "
+                "Please try again tomorrow."
+            )
+            return
+        st.session_state.request_count += 1
+
         st.session_state.proposed_name = proposed_name
         st.session_state.proposed_desc = proposed_desc
 
