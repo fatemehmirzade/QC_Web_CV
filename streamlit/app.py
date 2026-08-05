@@ -258,8 +258,49 @@ UNIT_NAME_TO_ID = {
     "count": "UO:0000189",
 }
 
+# Canonical display name for each unit accession. MANY aliases in UNIT_NAME_TO_ID resolve to the same ID (e.g. "dimensionless", "dimensionless unit", "unitless", "none", "a.u." all -> UO:0000186). without a single canonical label, the OBO block would render whatever  name the LLM happened to supply, so the SAME accession could appear as "UO:0000186 ! dimensionless unit" in one metric and "UO:0000186 ! dimensionless" in another, this map pins one name per ID, keep in sync with UNIT_NAME_TO_ID: every distinct value there must have an entry here.
+UNIT_ID_TO_CANONICAL_NAME = {
+    "UO:0000169": "parts per million",
+    "UO:0000189": "count unit",
+    "UO:0000010": "second",
+    "UO:0000191": "fraction",
+    "UO:0000221": "dalton",
+    "UO:0000187": "percent",
+    "MS:1000043": "intensity unit",
+    "UO:0000109": "pressure unit",
+    "UO:0000106": "hertz",
+    "UO:0000266": "electronvolt",
+    "UO:0000028": "millisecond",
+    "UO:0000031": "minute",
+    "UO:0000240": "thompson",
+    "MS:1000040": "m/z",
+    "MS:1000131": "number of detector counts",
+    "UO:0000218": "volt",
+    "UO:0000027": "degree celsius",
+    "UO:0000110": "pascal",
+    "UO:0000186": "dimensionless unit",
+    "UO:0000195": "degree fahrenheit",
+    "UO:0000012": "kelvin",
+    "UO:0000018": "nanometer",
+    "UO:0000017": "micrometer",
+    "UO:0000016": "millimeter",
+    "UO:0000269": "absorbance unit",
+    "UO:0000002": "mass unit",
+    "UO:0000222": "kilodalton",
+    "UO:0000232": "bit",
+    "UO:0000190": "ratio",
+    "UO:0000041": "picomole",
+    "UO:0000040": "nanomole",
+    "UO:0000101": "microliter",
+    "UO:0000098": "milliliter",
+    "UO:0000099": "liter",
+}
+
+
+#rate limiting
 
 def check_rate_limit():
+    """per session daily cap on LLM calls."""
     if "request_count" not in st.session_state:
         st.session_state.request_count = 0
         st.session_state.first_request_time = time.time()
@@ -270,8 +311,7 @@ def check_rate_limit():
 
 
 def _resolve_unit(unit_name):
-    """resolve a unit name to its OBO ID, trying exact match,
-    then case insensitive then plural stripping"""
+    """resolve a unit name to its OBO ID, trying exact match then case insensitive then plural stripping"""
     if not unit_name:
         return None
     uid = UNIT_NAME_TO_ID.get(unit_name)
@@ -289,9 +329,21 @@ def _resolve_unit(unit_name):
     return None
 
 
+def _resolve_unit_with_name(unit_name):
+    """resolve a unit name to (canonical_id, canonical_name) guarantees that a given accession ALWAYS renders with the same display name, regardless of which alias the LLM supplied. Falls back to the original name only if the ID has no canonical entry (should not happen while UNIT_ID_TO_CANONICAL_NAME stays in sync with UNIT_NAME_TO_ID)."""
+    uid = _resolve_unit(unit_name)
+    if not uid:
+        return None, None
+    canonical = UNIT_ID_TO_CANONICAL_NAME.get(uid)
+    if not canonical:
+        logger.warning(
+            "Unit ID %s (from '%s') has no canonical name entry", uid, unit_name
+        )
+        canonical = unit_name
+    return uid, canonical
+
+
 def _fix_name_casing(name):
-    """fix standard MS abbreviations that the LLM lowercased deterministic post-processing so 'ms2 spectral entropy mean'
-    becomes 'MS2 spectral entropy mean'"""
     if not name:
         return name
     words = name.split()
@@ -715,6 +767,14 @@ def reconstruct_obo_block(raw_term):
     return "\n".join(lines)
 
 
+def _clean_def_text(text):
+    """strip any surrounding matched double-quote wrappers the model may have added to the definition text. Observed failure: the model returns a value already wrapped in quotes, so wrapping it again in the OBO block produces "..." which is invalid OBO and breaks parsing when the block is pasted into psi-ms.obo. only balanced leading+trailing quote pairs are removed, internal quotes and one-sided quotes are preserved."""
+    text = (text or "").strip()
+    while len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        text = text[1:-1].strip()
+    return text
+
+
 def generate_obo_block(result):
     """generate a new OBO [Term] block from LLM results"""
     vtype = result.get("metric_value_type", "single value")
@@ -726,11 +786,12 @@ def generate_obo_block(result):
     columns = result.get("suggested_columns", [])
     comment = result.get("suggested_comment", "")
     name = _fix_name_casing(result.get("suggested_name", ""))
+    def_text = _clean_def_text(result.get("suggested_def", ""))
     obo_lines = [
         "[Term]",
         "id: MS:4000XXX",
         f"name: {name}",
-        f'def: "{result["suggested_def"]}" [PSI:MS]',
+        f'def: "{def_text}" [PSI:MS]',
     ]
     if comment:
         obo_lines.append(f"comment: {comment}")
@@ -741,9 +802,11 @@ def generate_obo_block(result):
             " ! The allowed value-type for this CV term"
         )
     for unit in units:
-        uid = _resolve_unit(unit)
+        # resolve to (id, canonical_name) so the same accession always
+        # renders with one consistent label across every generated metric
+        uid, canonical = _resolve_unit_with_name(unit)
         if uid:
-            obo_lines.append(f"relationship: has_units {uid} ! {unit}")
+            obo_lines.append(f"relationship: has_units {uid} ! {canonical}")
         else:
             logger.warning("Unknown unit '%s' — skipping from OBO block", unit)
     for cat_name in categories:
@@ -1046,6 +1109,10 @@ def build_system_prompt(candidate_display_terms, total_count, active_count):
         "          the lower-limit companion of an upper-limit metric).\n\n"
 
         "EXCLUDE from suggested_relations (do NOT include):\n"
+        "  - The metric's own has_metric_category terms. A term that belongs\n"
+        "    in suggested_categories (e.g. 'MS2 metric', 'ID free metric')\n"
+        "    MUST NOT also appear in suggested_relations -- an accession is\n"
+        "    either a category or a relation, never both.\n"
         "  - Obsolete terms (is_obsolete: true) unless no active alternative\n"
         "    exists and the obsolete term is the only direct match.\n"
         "  - Vendor-specific processing parameters (e.g. ProteomeDiscoverer,\n"
@@ -1069,7 +1136,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count):
         "or use an empty list.\n",
 
         #overlap analysis (with precise borderline rules)
-        
+
         "STEP 8 -- OVERLAP ANALYSIS (BE THOROUGH, PRECISE, AND "
         "SCOPE-AWARE):\n"
         "Compare the proposed QC metric against the provided terms.\n\n"
@@ -1320,8 +1387,7 @@ def _fix_result_name_casing(result):
 
 
 def _stabilize_relations(result, candidate_display_terms):
-    """deterministic post processing to keep relations small snd stable and directly relevant. Removes obsolete terms, vendor-specific terms,
-    low overlap only terms and deduplicates by ID"""
+    """deterministic post processing to keep relations small snd stable and directly relevant. Removes obsolete terms, vendor specific terms,low overlap only terms, terms already used as metric categories and deduplicates by ID"""
     rels = result.get("suggested_relations", [])
     if not rels:
         return result
@@ -1334,6 +1400,13 @@ def _stabilize_relations(result, candidate_display_terms):
         tid = item.get("id", "")
         lvl = item.get("overlap_level", "low").lower()
         overlap_levels[tid] = lvl
+
+    #IDs already used as has_metric_category for this metric. An accession must be either a category (has_metric_category) OR a relation (has_relation), never both, so we drop any relation that collides with a category. Categories are named strings resolved via CATEGORY_NAME_TO_ID.
+    category_ids = {
+        CATEGORY_NAME_TO_ID.get(c)
+        for c in (result.get("suggested_categories") or [])
+    }
+    category_ids.discard(None)
 
     #vendor specific prefixes to filter out
     vendor_prefixes = [
@@ -1349,6 +1422,10 @@ def _stabilize_relations(result, candidate_display_terms):
         if rid in seen_ids:
             continue
         seen_ids.add(rid)
+
+        #skip if this term is already declared as a metric category
+        if rid in category_ids:
+            continue
 
         term = id_to_term.get(rid, {})
 
@@ -1368,6 +1445,19 @@ def _stabilize_relations(result, candidate_display_terms):
     cleaned.sort(key=lambda r: r.get("id", ""))
 
     result["suggested_relations"] = cleaned
+    return result
+
+
+def _canonicalize_returned_names(result, candidate_display_terms):
+    id_to_name = {t["id"]: t["name"] for t in candidate_display_terms}
+    for item in result.get("overlap_results", []):
+        canonical = id_to_name.get(item.get("id"))
+        if canonical:
+            item["name"] = canonical
+    for rel in result.get("suggested_relations", []):
+        canonical = id_to_name.get(rel.get("id"))
+        if canonical:
+            rel["name"] = canonical
     return result
 
 #streamlit UI
@@ -1400,6 +1490,10 @@ def render_sidebar(display_terms, active_count, api_key):
     st.sidebar.write(f"Number of Terms: {len(display_terms)} ")
     st.sidebar.write("Classification: 7 dimensions")
     st.sidebar.write("Model: GPT-5.4")
+    used = st.session_state.get("request_count", 0)
+    st.sidebar.write(
+        f"Analyses used today: {used} / {MAX_REQUESTS_PER_DAY}"
+    )
 
 
 def render_accepted_sidebar():
@@ -1623,6 +1717,14 @@ def render_clarification_ui(result, api_key):
         if not follow_up.strip():
             st.warning("Please type some additional detail first.")
             return False
+        #re-analysis is a full LLM call, so it counts against the daily cap
+        if not check_rate_limit():
+            st.error(
+                f"Daily limit reached ({MAX_REQUESTS_PER_DAY} analyses per "
+                "day). Please try again tomorrow."
+            )
+            return False
+        st.session_state.request_count += 1
         st.session_state.messages.append({
             "role": "user",
             "content": (
@@ -1654,6 +1756,9 @@ def render_clarification_ui(result, api_key):
             result2 = _fix_result_name_casing(result2)
             if candidate_display:
                 result2 = _stabilize_relations(result2, candidate_display)
+                result2 = _canonicalize_returned_names(
+                    result2, candidate_display
+                )
             st.session_state.result = result2
             st.session_state.messages.append({
                 "role": "assistant",
@@ -1720,16 +1825,17 @@ def main():
         f"**GPT-5.4 **."
     )
 
-    render_sidebar(display_terms, active_count, api_key)
-    render_accepted_sidebar()
-
     for key, default in [
         ("messages", []), ("result", None),
         ("proposed_name", ""), ("proposed_desc", ""),
         ("candidate_terms_raw", []),
+        ("request_count", 0), ("first_request_time", time.time()),
     ]:
         if key not in st.session_state:
             st.session_state[key] = default
+
+    render_sidebar(display_terms, active_count, api_key)
+    render_accepted_sidebar()
 
     G, term_ids, embedding_matrix = None, None, None
     if api_key:
@@ -1768,8 +1874,8 @@ def main():
     if analyze_clicked:
         if not check_rate_limit():
             st.error(
-                f"Daily limit reached ({MAX_REQUESTS_PER_DAY} analyses per day). "
-                "Please try again tomorrow."
+                f"Daily limit reached ({MAX_REQUESTS_PER_DAY} analyses per "
+                "day). Please try again tomorrow."
             )
             return
         st.session_state.request_count += 1
@@ -1826,6 +1932,8 @@ def main():
             result = _fix_result_name_casing(result)
 
             result = _stabilize_relations(result, candidate_display)
+
+            result = _canonicalize_returned_names(result, candidate_display)
 
             st.session_state.result = result
             st.session_state.messages.append({
