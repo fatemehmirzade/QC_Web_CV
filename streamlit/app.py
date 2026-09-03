@@ -24,6 +24,7 @@ EMBED_QUOTA = 25
 GRAPH_QUOTA = 15
 GRAPH_HOP_LIMIT = 2
 MAX_CANDIDATES = EMBED_QUOTA + GRAPH_QUOTA
+
 HUB_DEGREE_LIMIT = 60
 
 API_TIMEOUT = 120
@@ -31,7 +32,7 @@ MAX_REQUESTS_PER_SESSION = 20
 LLM_MODEL = "gpt-5.4"
 MAX_COMPLETION_TOKENS = 16000
 
-#the CV is pulled from the master branch of the psi-ms-CV repository so the app always validates against the current vocabulary
+#the CV comes from the psi-ms-cv
 OBO_BLOB_URL = "https://github.com/HUPO-PSI/psi-ms-CV/blob/master/psi-ms.obo"
 OBO_RAW_URL = "https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"
 OBO_COMMITS_API = (
@@ -47,27 +48,31 @@ CV_CACHE_TTL = 24 * 3600
 CV_DOWNLOAD_TIMEOUT = 90
 CV_API_TIMEOUT = 20
 USER_AGENT = "psi-ms-qc-metric-proposal-analyzer/2.1"
+
 LOCAL_OBO_FALLBACK = os.path.join(SCRIPT_DIR, "psi-ms.obo")
 
 logger = logging.getLogger(__name__)
 
 OVERLAP_RANK = {"duplicate": 4, "high": 3, "moderate": 2, "low": 1}
 
-#top level accessions of the QC CV that we use as anchors to derive the vocabularies dynamically instead of hardcoding lists that go stale
+
 QC_ROOT_ID = "MS:4000000"
 QC_METRIC_ID = "MS:4000001"
 QC_VALUE_TYPE_ROOT_ID = "MS:4000002"
 QC_CATEGORY_ROOT_ID = "MS:4000007"
-#every non metric QC term must hang under this one otherwise it floats at the top level of the CV
+
 QC_NON_METRIC_ID = "MS:4000080"
 QC_NON_METRIC_NAME = "QC non-metric term"
+
 
 QC_NAMESPACE_MIN = 4000000
 QC_NAMESPACE_MAX = 4999999
 
+#spec 4.1
 MAX_NAME_LENGTH = 100
 NAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9 \-_,\.]+$")
 
+#placeholder accessions: the metric gets MS:4000XXX
 NEW_TERM_PLACEHOLDER = "MS:4000XXX"
 NEW_COLUMN_PLACEHOLDER_TEMPLATE = "MS:4000XX{n}"
 
@@ -240,6 +245,7 @@ CLASSIFICATION_SCHEMA = {
     },
 }
 
+#fallbacks
 FALLBACK_VTYPE_NAME_TO_ID = {
     "single value": "MS:4000003",
     "n-tuple": "MS:4000004",
@@ -247,6 +253,7 @@ FALLBACK_VTYPE_NAME_TO_ID = {
     "matrix": "MS:4000006",
 }
 
+#documentation discrepancy -> section 7 of the mzQC document
 VTYPE_ALIASES = {
     "tuple": "n-tuple",
     "ntuple": "n-tuple",
@@ -276,7 +283,6 @@ FALLBACK_CATEGORY_NAME_TO_ID = {
     "QC2 sample metric": "MS:4000076",
 }
 
-#unit aliases the LLM (or a user) is likely to type
 UNIT_ALIAS_TO_ID = {
     "parts per million": "UO:0000169", "ppm": "UO:0000169",
     "count unit": "UO:0000189", "count": "UO:0000189", "counts": "UO:0000189",
@@ -315,6 +321,7 @@ UNIT_ALIAS_TO_ID = {
     "bit": "UO:0000232", "bits": "UO:0000232", "shannon": "UO:0000232",
 }
 
+#canonical name for every accession
 EXTRA_UNIT_NAMES = {
     "UO:0000002": "mass unit",
     "UO:0000008": "meter",
@@ -356,7 +363,7 @@ EXTRA_UNIT_NAMES = {
 #rate limiting
 
 def check_rate_limit():
-    """cap on LLM calls. this is a PER SESSION cap, not a per user or per day cap: streamlit session state is lost on a refresh or in a new tab, so it protects a shared API key against one runaway session and nothing more"""
+
     if "request_count" not in st.session_state:
         st.session_state.request_count = 0
         st.session_state.first_request_time = time.time()
@@ -366,7 +373,7 @@ def check_rate_limit():
     return st.session_state.request_count < MAX_REQUESTS_PER_SESSION
 
 
-#CV download
+#most recent cv download
 
 def _http_get(url, timeout, accept=None):
     headers = {"User-Agent": USER_AGENT}
@@ -414,7 +421,7 @@ def _write_cv_disk_cache(text, meta):
 
 
 def parse_obo_header(text):
-    """pull format version, data version and date out of the OBO header stanza the data version is what we report as the CV version in the mzQC cv element"""
+    """pull format version, data version, date out of the OBO header"""
     header = text.split("[Term]", 1)[0]
     out = {}
     for key in ("format-version", "data-version", "date", "saved-by"):
@@ -443,7 +450,6 @@ def _resolve_cv_commit_sha():
 
 @st.cache_data(ttl=CV_CACHE_TTL, show_spinner=False)
 def fetch_cv_text(refresh_token=0):
-    """download the current psi-ms.obo from the psi ms CV master branch"""
     meta = {
         "origin": None,
         "retrieved_at": None,
@@ -540,6 +546,7 @@ def parse_obo_text(text):
             elif line.startswith("comment: "):
                 term["comment"] = line[9:].strip()
             elif line.startswith("synonym: "):
+                #keep scope plus xrefs so an exact synonym is not rewritten as related [] when the term is echoed back
                 m = re.match(r'synonym:\s*"(.*?)"\s*(.*)$', line)
                 if m:
                     term["synonyms"].append({
@@ -578,6 +585,7 @@ def _parse_relationship(term, rel):
             term[key].append(rel[len(prefix):].strip())
             return
     if rel.startswith("has_value_type "):
+        #cv has trailing spaces on many of these lines strip them or "xsd:float " fails every downstream comparison
         term["xsd_value_type"] = rel[15:].strip()
     elif rel.startswith("has_order "):
         term["order"] = rel[10:].strip()
@@ -585,9 +593,6 @@ def _parse_relationship(term, rel):
         term["domain"] = rel[11:].strip()
     elif rel.startswith("part_of "):
         term["part_of"].append(rel[8:].strip())
-
-
-#CV index everything the app needs to know about which accession is what is derived here from the downloaded CV rather than from hardcoded dictionaries
 
 def _numeric_ms_id(term_id):
     m = re.fullmatch(r"MS:(\d{7})", term_id or "")
@@ -600,6 +605,7 @@ def _is_in_qc_namespace(term_id):
 
 
 def _descendants_of(children_map, root_id, stop_at=()):
+    """transitive children of root id"""
     stop = set(stop_at)
     seen, frontier = set(), [root_id]
     while frontier:
@@ -614,7 +620,7 @@ def _descendants_of(children_map, root_id, stop_at=()):
 
 
 def build_cv_index(raw_terms):
-    """build every name->accession lookup the app needs straight from the CV"""
+    """build every name->accession lookup the app needs straight from cv"""
     id_to_name = {t["id"]: t["name"] for t in raw_terms}
     id_to_term = {t["id"]: t for t in raw_terms}
 
@@ -624,7 +630,6 @@ def build_cv_index(raw_terms):
             pid = parent.split(" ! ")[0].strip()
             children.setdefault(pid, set()).add(t["id"])
 
-    #value types are exactly the DIRECT children of MS:4000002 (single value
     vtype_direct_children = set(children.get(QC_VALUE_TYPE_ROOT_ID, ()))
     vtype_name_to_id, vtype_id_to_name = {}, {}
     for vid in sorted(vtype_direct_children):
@@ -634,7 +639,7 @@ def build_cv_index(raw_terms):
         vtype_name_to_id = dict(FALLBACK_VTYPE_NAME_TO_ID)
         vtype_id_to_name = {v: k for k, v in FALLBACK_VTYPE_NAME_TO_ID.items()}
 
-    #anything that hangs under one of the four value types IS a metric, never a category. we compute this set explicitly so it can be subtracted below
+    #anything under one of the four value types is a metric never a category
     metric_ids = set()
     for t in raw_terms:
         parents = {p.split(" ! ")[0].strip() for p in t.get("is_a", [])}
@@ -660,13 +665,12 @@ def build_cv_index(raw_terms):
     if not category_name_to_id:
         category_name_to_id = dict(FALLBACK_CATEGORY_NAME_TO_ID)
     if len(category_name_to_id) > 80:
-        #a tripwire for exactly the failure described above, if this fires the category anchors in the CV have changed shape and need a look
+        #tripwire: if this fires the category anchors in the CV have moved
         logger.warning(
             "Category allow list is unusually large (%d entries), the CV "
             "hierarchy may have changed", len(category_name_to_id)
         )
 
-    #units: harvest every accession that any term already uses via has_units
     unit_id_to_name = {}
     for t in raw_terms:
         for u in t.get("units", []):
@@ -678,7 +682,7 @@ def build_cv_index(raw_terms):
             )
             unit_id_to_name.setdefault(uid, uname)
     for uid, uname in EXTRA_UNIT_NAMES.items():
-        #a term that psi-ms.obo does define keeps the CV spelling, the litera is only the floor for accessions the CV cannot name
+
         unit_id_to_name.setdefault(uid, id_to_name.get(uid, uname))
 
     unit_name_to_id = {}
@@ -705,7 +709,8 @@ def build_cv_index(raw_terms):
             cname = parts[1].strip() if len(parts) == 2 else cid
             concept_id_to_name.setdefault(cid, cname)
 
-    #candidate table columns: anything already used as a column, plus any term that carries a unit or is a single value QC metric (spec 4.1 allows any cv term with a single value specification and an unambiguous unit)
+    #candidate columns: anything already used as one, plus any term carrying a
+    #unit or typed as a single value metric (spec 4.1 allows both)
     column_id_to_name = {}
     used_column_id_to_name = {}
     single_value_id = vtype_name_to_id.get("single value")
@@ -717,6 +722,9 @@ def build_cv_index(raw_terms):
                 parts[1].strip() if len(parts) == 2
                 else id_to_name.get(cid, cid)
             )
+            #the CV uses NCIT plus OBI accessions as columns which psi-ms.obo
+            #never defines, so resolve_column looks here first or a legal
+            #column is dropped as unverifiable
             column_id_to_name.setdefault(cid, cname)
             used_column_id_to_name.setdefault(cid, cname)
     for t in raw_terms:
@@ -725,6 +733,8 @@ def build_cv_index(raw_terms):
         parents = [p.split(" ! ")[0].strip() for p in t.get("is_a", [])]
         if t.get("units") or (single_value_id and single_value_id in parents):
             column_id_to_name.setdefault(t["id"], t["name"])
+    #terms under 'QC non-metric term' exist to be used as columns so they are
+    #always offered, even when nothing references them yet
     for cid in _descendants_of(children, QC_NON_METRIC_ID):
         if cid in id_to_name:
             column_id_to_name.setdefault(cid, id_to_name[cid])
@@ -762,7 +772,7 @@ def build_cv_index(raw_terms):
 
 
 def resolve_unit(cv_index, unit_name):
-    """resolve a unit name or accession to id"""
+    """resolve a unit name or accession to (id, canonical CV name)"""
     if not unit_name:
         return None, None
     raw = str(unit_name).strip()
@@ -799,7 +809,6 @@ def resolve_category(cv_index, cat_name):
 
 
 def resolve_value_concept(cv_index, ref):
-    """value concepts live in STATO NCIT and MS"""
     if isinstance(ref, dict):
         candidate_id = (ref.get("id") or "").strip()
         candidate_name = (ref.get("name") or "").strip()
@@ -817,7 +826,6 @@ def resolve_value_concept(cv_index, ref):
 
 
 def column_units(cv_index, column_id):
-    """the units a column term declares through its own has_units"""
     if column_id in cv_index["unit_id_to_name"]:
         return [(column_id, cv_index["unit_id_to_name"][column_id])]
     term = cv_index["id_to_term"].get(column_id)
@@ -836,7 +844,7 @@ def column_units(cv_index, column_id):
 
 
 def resolve_column(cv_index, ref):
-    """resolve a table column term"""
+    """resolve a table column term. the harvested column set is checked 1st bc the CV uses accessions from other ontologies as columns"""
     if isinstance(ref, dict):
         candidate_id = (ref.get("id") or "").strip()
         candidate_name = (ref.get("name") or "").strip()
@@ -904,6 +912,7 @@ def build_knowledge_graph(raw_terms):
 
 
 def get_graph_neighbors(G, node_ids, hops=1, hub_degree_limit=HUB_DEGREE_LIMIT):
+    """breadth first expansion returning {node_id: hop_distance} for the neighbours only. expansion never continues through a hub node, one hop from MS:4000003 would otherwise return the whole namespace"""
     dist = {n: 0 for n in node_ids if n in G}
     frontier = set(dist)
     for hop in range(1, hops + 1):
@@ -1010,10 +1019,6 @@ def _sanitize_embedding_matrix(matrix):
 
 
 def build_or_load_embeddings(raw_terms, api_key):
-    """the cache key is the content hash of the CV, so the day the psi-ms-CV
-    master branch changes the embeddings are rebuilt automatically on the next
-    start. that is one full embedding pass over the whole CV, it costs cents but
-    it takes a minute, which is why the disk cache matters"""
     obo_hash = _obo_content_hash(raw_terms)
     cached = _load_embedding_cache(obo_hash)
     if cached is not None:
@@ -1110,7 +1115,7 @@ def _is_qc_metric_term(term_display):
     if term_display.get("value_type"):
         return True
     if _is_in_qc_namespace(term_display.get("id", "")):
-        #QC non metric terms live in the QC namespace but are columns
+        #QC non metric terms live in the QC namespace but are columns, never duplicate candidates
         parents = term_display.get("is_a", [])
         parent_ids = {p["id"] for p in parents if isinstance(p, dict)}
         if QC_NON_METRIC_ID in parent_ids:
@@ -1181,7 +1186,7 @@ def max_overlap_level(overlap_results):
 
 
 def compute_verdict_flags(result):
-    """single source of truth for the verdict booleans, used both by the render layer and by the analysis branch that persists accepted metrics"""
+    """single source of truth for the verdict booleans, used by the render layer as well as the branch that persists accepted metrics"""
     top_level = max_overlap_level(result.get("overlap_results", []))
     is_duplicate = top_level == "duplicate"
     is_high = top_level == "high"
@@ -1203,6 +1208,7 @@ def find_raw_term_by_id(raw_terms, term_id):
 #text sanitation, spec 4.1
 
 def _sanitize_cv_text(text):
+    """spec 4.1: no escaped characters or backticks in a name, definition or comment, single quotes quote words. newlines are flattened because a def must live on ONE obo line or the pasted block corrupts psi-ms.obo"""
     if not text:
         return ""
     t = str(text)
@@ -1213,7 +1219,6 @@ def _sanitize_cv_text(text):
 
 
 def _strip_def_boilerplate(text):
-    """drop the 'Quality control metric reporting ...' opener"""
     stripped = DEF_BOILERPLATE_RE.sub("", text or "", count=1)
     if stripped != text and stripped:
         stripped = stripped[0].upper() + stripped[1:]
@@ -1221,7 +1226,6 @@ def _strip_def_boilerplate(text):
 
 
 def _clean_def_text(text):
-    """strip any surrounding matched double quote wrappers the model may have added then apply the spec 4.1 sanitizer, drop the boilerplate opener and make sure the definition ends with a full stop"""
     text = (text or "").strip()
     while len(text) >= 2 and text[0] == '"' and text[-1] == '"':
         text = text[1:-1].strip()
@@ -1266,6 +1270,7 @@ def _name_tokens(name):
 
 
 def name_drift_ratio(proposed_name, drafted_name):
+    """jaccard overlap of the content words of two names. a low value means the drafted term is not the metric that was proposed. returns 1.0 when there is nothing to compare"""
     a, b = _name_tokens(proposed_name), _name_tokens(drafted_name)
     if not a or not b:
         return 1.0
@@ -1283,6 +1288,7 @@ def normalize_value_type(vtype):
 
 
 def _clean_xref(value):
+    """an OBO xref is one token: PMID:123, DOI:10.x/y or a URL. anything with a space or a bracket would break the stanza"""
     x = _sanitize_cv_text(value).strip()
     if not x or " " in x or "[" in x or "]" in x:
         return ""
@@ -1292,7 +1298,7 @@ def _clean_xref(value):
 #OBO generation and spec validation
 
 def resolve_term_parts(result, cv_index):
-    """resolve every accession the model proposed against the live cv exactly once, so the OBO block, the compliance report and the mzQC snippet all work from the same resolved values instead of resolving three times with three slightly different rules"""
+    """resolve every accession the model proposed against the live cv exactly once, so the OBO block, the compliance report, the mzQC snippet all work from the same values"""
     vtype = normalize_value_type(result.get("metric_value_type"))
     vtype_id = cv_index["vtype_name_to_id"].get(vtype)
 
@@ -1334,7 +1340,7 @@ def resolve_term_parts(result, cv_index):
         )
         (optional_columns if is_optional else columns).append((cid, cname))
 
-
+    #columns that do not exist yet are NOT dropped, each gets a draft [Term] block under QC non-metric term with a numbered placeholder accession
     new_columns = []
     for i, nc in enumerate(result.get("suggested_new_column_terms") or [], 1):
         if not isinstance(nc, dict):
@@ -1346,7 +1352,15 @@ def resolve_term_parts(result, cv_index):
         xsd = (nc.get("xsd_type") or "").strip()
         if xsd not in ALLOWED_XSD_TYPES:
             xsd = "xsd:float"
+        #a statistical column (R2, slope, intercept, CV, mean) carries the STATO/NCIT concept it represents, like the metric itself
+        ccid, ccname = (None, None)
+        if nc.get("value_concept"):
+            ccid, ccname = resolve_value_concept(
+                cv_index, nc.get("value_concept")
+            )
         new_columns.append({
+            "concept_id": ccid,
+            "concept_name": ccname,
             "placeholder_id": NEW_COLUMN_PLACEHOLDER_TEMPLATE.format(n=i),
             "name": cname,
             "def": _clean_def_text(nc.get("def")),
@@ -1414,6 +1428,7 @@ def resolve_term_parts(result, cv_index):
 
 
 def generate_obo_block(result, cv_index):
+    """generate a new OBO [Term] block. every accession in it is resolved against the downloaded CV so the block can be pasted into a term request without hand checking the numbers"""
     p = resolve_term_parts(result, cv_index)
     lines = [
         "[Term]",
@@ -1434,7 +1449,7 @@ def generate_obo_block(result, cv_index):
             f"relationship: has_value_type {p['xsd_type']}"
             " ! The allowed value-type for this CV term"
         )
-    #spec 4.1: a table carries no unit of its own, its units come from the has_units of each column term, so we deliberately suppress has_units here
+    #spec 4.1: a table carries no unit of its own, its units come from the has_units of each column term
     if p["value_type"] != "table":
         for uid, uname in p["units"]:
             lines.append(f"relationship: has_units {uid} ! {uname}")
@@ -1467,7 +1482,7 @@ def generate_obo_block(result, cv_index):
 
 
 def generate_new_column_blocks(parts, cv_index):
-    """draft [Term] blocks for the table columns that do not exist yet every one of them is is_a QC non-metric term: a term without an is_a floats at the top level of the cv and a column is not itself a metric so it does not belong under one of the value types"""
+    """draft [Term] blocks for the table columns that do not exist yet. each is is_a QC non-metric term: a column is not a metric, a term with no is_a floats at the top level of the CV"""
     parent_id = cv_index["non_metric_parent_id"]
     parent_name = cv_index["non_metric_parent_name"]
     blocks = []
@@ -1485,6 +1500,11 @@ def generate_new_column_blocks(parts, cv_index):
             f"relationship: has_value_type {nc['xsd_type']}"
             " ! The allowed value-type for this CV term"
         )
+        if nc.get("concept_id"):
+            lines.append(
+                f"relationship: has_value_concept {nc['concept_id']}"
+                f" ! {nc['concept_name']}"
+            )
         if nc["unit_id"]:
             lines.append(
                 f"relationship: has_units {nc['unit_id']} ! {nc['unit_name']}"
@@ -1493,8 +1513,32 @@ def generate_new_column_blocks(parts, cv_index):
     return blocks
 
 
+IDENTIFIER_NAME_RE = re.compile(
+    r"\b(identifier|id|accession|name|key|label)\b", re.IGNORECASE
+)
+
+#words that show the definition says what the identifier actually is
+FORMAT_HINT_RE = re.compile(
+    r"(accurate mass|retention time|\bm/z\b|transition|precursor|"
+    r"accession|USI|spectral librar|database|InChI|SMILES|formula|CAS|"
+    r"LIPID MAPS|HMDB|ChEBI|UniProt|proforma|scan number|index|"
+    r"native spectrum identifier)", re.IGNORECASE
+)
+
+
+def _is_identifier_column(new_column):
+    """a column that names the row rather than measuring it"""
+    if new_column.get("xsd_type") != "xsd:string":
+        return False
+    return bool(IDENTIFIER_NAME_RE.search(new_column.get("name", "")))
+
+
+def _states_a_format(definition):
+    return bool(FORMAT_HINT_RE.search(definition or ""))
+
+
 def validate_generated_term(parts, cv_index, proposed_name=None):
-    """check the proposed term against the must rules of mzQC 1.0.0 section 4.1 and section 7"""
+    """check the drafted term against the MUST/SHOULD rules of mzQC 1.0.0 section 4.1 plus section 7. returns the list the compliance panel renders"""
     checks = []
 
     def add(level, rule, message):
@@ -1526,7 +1570,7 @@ def validate_generated_term(parts, cv_index, proposed_name=None):
             add("ok", "4.1 Name",
                 f"'{name}' is unique in this CV version and within the length "
                 "limit.")
-        #the drafted term must be the metric that was proposed
+        #drafted term must be the metric that was proposed a renamed one usually means the model answered a different question
         if proposed_name and name_drift_ratio(proposed_name, name) < 0.6:
             add("warning", "Proposal fidelity",
                 f"The drafted term is called '{name}' but you proposed "
@@ -1572,7 +1616,7 @@ def validate_generated_term(parts, cv_index, proposed_name=None):
         n_new = len(parts["new_columns"])
         if n_existing == 0 and n_new == 0:
             add("error", "4.1 Table columns",
-                "A table MUST define at least one has_column term and none "
+                "A table MUST define at least one has_column term, and none "
                 "were resolved or proposed.")
         elif n_existing:
             add("ok", "4.1 Table columns",
@@ -1614,6 +1658,14 @@ def validate_generated_term(parts, cv_index, proposed_name=None):
             if not nc["def"]:
                 add("warning", "4.1 Table columns",
                     f"Proposed column term '{nc['name']}' has no definition.")
+            elif _is_identifier_column(nc) and not _states_a_format(nc["def"]):
+                add("warning", "4.1 Table columns",
+                    f"Proposed identifier column '{nc['name']}' does not "
+                    "say what identifies the row. State the format "
+                    "(accurate mass and retention time, a transition m/z "
+                    "pair, a database accession, a specified name): there "
+                    "is no feature-level USI yet, so an unspecified "
+                    "identifier is not reproducible across tools.")
     else:
         if parts["new_columns"]:
             add("warning", "4.1 Table columns",
@@ -1659,7 +1711,7 @@ def validate_generated_term(parts, cv_index, proposed_name=None):
     else:
         add("ok", "4.1 Categorization", ", ".join(cat_names))
 
-    #a table with one row per feature summarising several runs is a multi run metric, the reviewers ask for this explicitly on every table proposal
+    #a table with one row per feature summarising several runs is a multi run metric
     if parts["value_type"] == "table" and not any(
         c in ("multiple runs based metric", "multiple spectra based metric")
         for c in cat_names
@@ -1692,7 +1744,6 @@ def validate_generated_term(parts, cv_index, proposed_name=None):
 
 
 def generate_mzqc_snippet(parts, cv_index):
-    """render how this metric would look inside the qualityMetrics array of an mzQC file it is the quickest way for a reviewer to see whether the value/unit combination actually makes sense"""
     snippet = {
         "accession": NEW_TERM_PLACEHOLDER,
         "name": parts["name"] or "new metric",
@@ -1729,6 +1780,7 @@ def generate_mzqc_snippet(parts, cv_index):
         elif parts["xsd_type"] == "xsd:boolean":
             base = True
         else:
+            #base is always a SCALAR, the ntuple or matrix shapes are built from it below
             base = 0.0
         if parts["value_type"] == "single value":
             snippet["value"] = base
@@ -1825,6 +1877,7 @@ def save_accepted_metrics(accepted):
 
 def append_new_metric(result, proposed_name, proposed_desc, cv_meta):
     accepted = load_accepted_metrics()
+    #dedup on BOTH names, the same proposal re-analysed can come back under a slightly different drafted name
     existing_drafted = {
         (m.get("suggested_name") or "").lower() for m in accepted
     }
@@ -1861,7 +1914,7 @@ def append_new_metric(result, proposed_name, proposed_desc, cv_meta):
     )
     record["overlap_results"] = result.get("overlap_results", [])
     record["verdict_summary"] = result.get("verdict_summary")
-    #record which cv version the decision was made against, otherwise a saved metric cannot be reproduced once master has moved on
+    #record the CV version the decision was made against, a saved metric cannot be reproduced once master has moved on
     record["cv_version"] = cv_meta.get("data-version")
     record["cv_uri"] = cv_meta.get("stable_uri")
     record["saved_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1872,7 +1925,7 @@ def append_new_metric(result, proposed_name, proposed_desc, cv_meta):
 
 
 def persist_if_new(result, cv_meta):
-    """persistence happens once right after an analysis, not inside the render path"""
+    """persistence happens ONCE right after an analysis, never inside the render path where every streamlit rerun would repeat it"""
     _, _, _, is_new_metric = compute_verdict_flags(result)
     if not (is_new_metric and result.get("suggested_name")):
         return None
@@ -1952,7 +2005,7 @@ def _build_id_lookup_table(candidate_display_terms):
 
 
 def _scope_hint_for(term_display):
-
+    """scope hint for one candidate term, read from its categories only"""
     cats_lower = " ".join(term_display.get("categories", [])).lower()
     per_spectrum = "single spectrum" in cats_lower
     many_spectra = "multiple spectra" in cats_lower
@@ -1986,7 +2039,6 @@ def _build_term_type_annotations(candidate_display_terms):
 
 
 def _build_vocab_tables(cv_index):
-    """dump the allowed categories, units and value concepts WITH their live accessions into the prompt. because these lists come from the downloaded CV the model is picking from real terms only and post processing has something exact to check against"""
     cats = "\n".join(
         f"    {cid}  {cname}"
         for cname, cid in sorted(cv_index["category_name_to_id"].items())
@@ -2011,7 +2063,6 @@ def _build_vocab_tables(cv_index):
 
 
 def _build_column_term_table(cv_index):
-    """the accessions the CV already uses as table columns, plus everything under QC non metric term"""
     return "\n".join(
         f"    {cid}  {cname}"
         for cid, cname in sorted(
@@ -2022,7 +2073,7 @@ def _build_column_term_table(cv_index):
 
 
 def build_spec_rules_section(cv_index):
-    """the hard rules that come from the mzQC 1.0.0 specification, section 4.1 (CV term requirements) and section 7 (value types)"""
+    """the hard rules from mzQC 1.0.0 section 4.1 (CV term requirements) plus section 7 (value types)"""
     cats, units, concepts, vtypes = _build_vocab_tables(cv_index)
     return "\n".join([
         "MZQC 1.0.0 SPECIFICATION RULES -- these are MUST/SHOULD rules from",
@@ -2156,6 +2207,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
         'sample.",\n'
         '      "xsd_type": "xsd:float",\n'
         '      "unit": "ratio",\n'
+        '      "value_concept": null,\n'
         '      "optional": false,\n'
         '      "xrefs": []\n'
         "    }\n"
@@ -2322,7 +2374,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
         "    * Anything computed from concentrations, areas or normalised\n"
         "      intensities is a 'quantification based metric'.\n"
         "  - suggested_units: exactly ONE unit name from the unit list for\n"
-        "    single value / n-tuple / matrix and an EMPTY list for a table.\n"
+        "    single value / n-tuple / matrix, and an EMPTY list for a table.\n"
         "  - suggested_value_concept: one entry from the value concept list,\n"
         "    or null if none fits.\n"
         "  - suggested_xsd_type: one of the allowed xsd types.\n",
@@ -2387,15 +2439,32 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
         "      unit (a name from the unit list, or null for an identifier or\n"
         "      label column), optional and xrefs. The app drafts each of these\n"
         f"      as its own OBO term under {non_metric_parent}, which is where\n"
-        "      column terms belong: they are not metrics and a term with no\n"
+        "      column terms belong: they are not metrics, and a term with no\n"
         "      is_a floats at the top level of the CV.\n"
         "      Keep these column terms GENERIC and reusable across studies,\n"
         "      not specific to one workflow or one software package.\n"
+        "      Each entry may also carry value_concept: the statistical\n"
+        "      concept the column reports, chosen from the VALUE CONCEPT\n"
+        "      list in <specification_rules>. A regression parameter, a\n"
+        "      coefficient of variation, a mean or a median SHOULD carry\n"
+        "      one. If the list holds nothing suitable, leave it null and\n"
+        "      say in verdict_summary which concept would be needed, in\n"
+        "      words, with no invented accession.\n"
+        "      IDENTIFIER COLUMNS MUST STATE THEIR FORMAT. A definition\n"
+        "      such as the identifier of the feature in this row is NOT\n"
+        "      acceptable: it tells a reader nothing about what to put in\n"
+        "      the column and makes the term unusable across tools. Say\n"
+        "      what identifies the row: an accurate mass and retention\n"
+        "      time pair, a transition or precursor-to-product m/z pair, a\n"
+        "      database or spectral library accession, or a specified\n"
+        "      textual name. A feature-level equivalent of the USI does\n"
+        "      not exist yet, so note in verdict_summary that the format\n"
+        "      has to be stated explicitly until one does.\n"
         "  (c) NEVER substitute a near-neighbour. A column accession must\n"
         "      match the MEANING of the column, not merely its role or its\n"
         "      data type. If the table needs a generic feature identifier,\n"
         "      do NOT reach for a peptide-specific term such as a proforma\n"
-        "      peptidoform sequence and if it needs a regression parameter,\n"
+        "      peptidoform sequence, and if it needs a regression parameter,\n"
         "      do NOT reach for a term that merely labels the quantification\n"
         "      datatype. A drafted new column term is ALWAYS better than a\n"
         "      semantically wrong existing accession: the draft is reviewed\n"
@@ -2413,7 +2482,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
         "      as a column forces a null into the mzQC unit array and gives\n"
         "      the reader a column with nothing to put in it.\n"
         "  (e) A term used as a column MUST NOT also appear in\n"
-        "      suggested_relations and vice versa. Decide the role once.\n"
+        "      suggested_relations, and vice versa. Decide the role once.\n"
         "  A per-spectrum table SHOULD carry a spectrum identifier column such\n"
         "  as the native spectrum identifier format, plus one column per\n"
         "  reported quantity. A per-feature table SHOULD carry a feature\n"
@@ -2422,7 +2491,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
 
         #overlap analysis (with precise borderline rules)
 
-        "STEP 8 -- OVERLAP ANALYSIS (BE THOROUGH, PRECISE AND "
+        "STEP 8 -- OVERLAP ANALYSIS (BE THOROUGH, PRECISE, AND "
         "SCOPE-AWARE):\n"
         "Compare the proposed QC metric against the provided terms.\n\n"
 
@@ -2502,7 +2571,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
         "is_obsolete, reasoning.\n"
         "IMPORTANT: The id and name MUST exactly match the id_lookup_table.\n"
         "IMPORTANT: In reasoning, ALWAYS state the scope, acquisition mode,\n"
-        "value type and statistic of BOTH terms.\n",
+        "value type, and statistic of BOTH terms.\n",
 
         "STEP 8b -- CONSOLIDATION CHECK:\n"
         "Separately from overlap, ask whether the proposal is one of SEVERAL\n"
@@ -2516,7 +2585,7 @@ def build_system_prompt(candidate_display_terms, total_count, active_count,
         "If that applies, set suggested_consolidation to a short paragraph\n"
         "naming the sibling parameters and the combined table term you would\n"
         "define instead (name plus the column list). Otherwise set it to null.\n"
-        "This does NOT change is_new or the overlap levels and it MUST NOT\n"
+        "This does NOT change is_new or the overlap levels, and it MUST NOT\n"
         "change the drafted term: suggested_name, metric_value_type,\n"
         "measurement_scope, suggested_columns and suggested_units still\n"
         "describe the metric the user proposed, per the faithfulness rule in\n"
@@ -2550,7 +2619,7 @@ def call_gpt(messages, api_key):
         "model": LLM_MODEL,
         "messages": messages,
         "max_completion_tokens": MAX_COMPLETION_TOKENS,
-        "temperature": 0,   #deterministic output
+        "temperature": 0,   
         "seed": 42,
     }
     try:
@@ -2574,6 +2643,7 @@ def call_gpt(messages, api_key):
         return None, "The model returned no choices."
     choice = response.choices[0]
     finish_reason = getattr(choice, "finish_reason", None)
+    #message.content is None on a refusal or a hard token cut-off
     raw = (getattr(choice.message, "content", None) or "").strip()
     if not raw:
         if finish_reason == "length":
@@ -2595,7 +2665,7 @@ def call_gpt(messages, api_key):
 
 
 def _find_json_object(text):
-    """scan for the first balanced {...} block, ignoring braces that occur inside string literals"""
+    """scan for the first balanced {...} block, ignoring braces inside string literals where a single '{' would throw the depth counter off"""
     depth, start = 0, None
     in_string, escaped = False, False
     for i, ch in enumerate(text):
@@ -2643,7 +2713,7 @@ def _parse_json_response(raw):
 #post processing
 
 def _validate_returned_ids(result, valid_id_set, cv_index):
-    """strip any accession numbers the llm fabricated"""
+    """strip accession numbers the model fabricated. overlaps plus relations must come from the candidate set. columns plus value concepts may be any CV term because retrieval does not surface every legal column"""
     warnings = []
     cleaned_overlaps = []
     for item in result.get("overlap_results", []):
@@ -2701,7 +2771,7 @@ def _validate_returned_ids(result, valid_id_set, cv_index):
                 )
     result["suggested_columns"] = cleaned_cols
 
-    #new column terms whose name already exists in the CV are not new, resolve them into real columns instead of drafting a duplicate term
+    #a proposed column whose name already exists in cv is not new, resolve it into a real column rather than drafting a duplicate term
     kept_new = []
     for nc in (result.get("suggested_new_column_terms") or []) + promoted:
         if not isinstance(nc, dict):
@@ -2750,7 +2820,7 @@ def _validate_returned_ids(result, valid_id_set, cv_index):
 
 
 def _enforce_base_term_overlap_cap(result, candidate_display_terms):
-    """downgrade duplicate/high overlap with base terms to moderate and promote the base term to a relation"""
+    """downgrade duplicate/high overlap with a base term to moderate"""
     base_term_ids = {
         t["id"] for t in candidate_display_terms
         if not _is_qc_metric_term(t)
@@ -2808,7 +2878,7 @@ def _fix_result_name_casing(result):
 
 
 def _enforce_value_type_rules(result, cv_index):
-    """deterministic enforcement of the spec 4.1 / section 7 value rules so amodel slip cannot produce a term that no mzQC validator would accept: a table never keeps units, a non table never keeps columns and a non table keeps at most one resolvable unit"""
+    """deterministic enforcement of the spec 4.1 value rules: a table never keeps units, a non table never keeps columns, a non table keeps at most one resolvable unit"""
     vtype = normalize_value_type(result.get("metric_value_type"))
     result["metric_value_type"] = vtype
     notes = []
@@ -2857,7 +2927,7 @@ def _enforce_value_type_rules(result, cv_index):
 
 
 def _stabilize_relations(result, candidate_display_terms, cv_index):
-    """deterministic post processing to keep relations small, stable and directly relevant."""
+    """keep relations small, stable, directly relevant. drops obsolete terms, vendor terms, low overlap terms, accessions already used in another role"""
     rels = result.get("suggested_relations", [])
     if not rels:
         return result
@@ -2870,7 +2940,6 @@ def _stabilize_relations(result, candidate_display_terms, cv_index):
         lvl = item.get("overlap_level", "low").lower()
         overlap_levels[tid] = lvl
 
-    #IDs already used elsewhere on this metric
     used_ids = set()
     for c in result.get("suggested_categories") or []:
         cid, _ = resolve_category(cv_index, c)
@@ -2906,6 +2975,7 @@ def _stabilize_relations(result, candidate_display_terms, cv_index):
         if rid in used_ids:
             continue
 
+        #fall back to the full cv
         term = id_to_term.get(rid) or cv_index["id_to_term"].get(rid, {})
         if term.get("is_obsolete"):
             continue
@@ -3099,7 +3169,6 @@ def render_vocabulary_browser(display_terms):
         f"Browse existing vocabulary ({len(display_terms)} terms)",
         expanded=False,
     ):
-
         query = st.text_input(
             "Filter by name or accession", key="vocab_filter"
         ).strip().lower()
@@ -3190,6 +3259,7 @@ def render_results(result, raw_terms, cv_index):
             st.caption(mzqc_note)
             st.code(generate_mzqc_snippet(parts, cv_index), language="json")
         else:
+            #the compliance report refers to this block so it stays visible even when the verdict advises against submitting the term
             with st.expander(
                 "Draft OBO entry for the proposal "
                 "(shown for reference, the verdict above advises against "
@@ -3396,7 +3466,7 @@ def render_clarification_ui(result, api_key, cv_index, cv_meta):
 
 @st.cache_resource(show_spinner=False)
 def load_metrics(_cv_text, cache_key):
-    """parse the downloaded CV once per CV version"""
+    """parse the downloaded CV once per CV version -> cache_resource not cache_data"""
     raw_terms = parse_obo_text(_cv_text)
     cv_index = build_cv_index(raw_terms)
     display_terms = [term_to_display_dict(t, cv_index) for t in raw_terms]
@@ -3444,7 +3514,7 @@ def main():
     if not cv_text.strip():
         st.error(
             "Could not obtain psi-ms.obo. The app tried "
-            f"{OBO_RAW_URL}, the local cache in {CV_CACHE_DIR} and "
+            f"{OBO_RAW_URL}, the local cache in {CV_CACHE_DIR}, and "
             f"{LOCAL_OBO_FALLBACK}. Check the network connection or place a "
             "copy of psi-ms.obo next to this script."
         )
@@ -3457,7 +3527,7 @@ def main():
         st.error("The downloaded psi-ms.obo contained no parsable terms.")
         return
 
-    #cache key for the resources that must be rebuilt when the CV changes
+    #cache key for the resources that must be rebuilt when the cv changes
     cv_cache_key = _obo_content_hash(raw_terms)
 
     active_count = sum(1 for t in display_terms if not t.get("is_obsolete"))
@@ -3503,7 +3573,7 @@ def main():
             "- What MS level (MS1, MS2, run-level)\n"
             "- Whether it summarises one run or several runs\n"
             "- What unit (ppm, seconds, fraction, count, etc.)\n"
-            "- What value type (single value, n-tuple, table, matrix) and "
+            "- What value type (single value, n-tuple, table, matrix), and "
             "for a table, which columns"
         ),
         height=180,
@@ -3567,7 +3637,7 @@ def main():
             if error:
                 st.error(error)
                 return
-            #a failed call does not consume the quota any more
+
             st.session_state.request_count += 1
 
             result = postprocess_result(
